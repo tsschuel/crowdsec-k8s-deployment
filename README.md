@@ -1,5 +1,6 @@
 # CrowdSec WAF on Kubernetes
 
+
 Traefik terminates TLS, asks CrowdSec AppSec (OWASP CRS, virtual patching and your custom rules) to
 inspect each request, and forwards clean requests over TLS to a single REST or WebSocket upstream.
 
@@ -61,7 +62,7 @@ kubectl -n waf create secret generic upstream-ca --from-file=ca.crt=upstream-ca.
 ```
 
 With cert-manager, create the `waf-frontend-tls` Secret through a `Certificate` instead.
-The proxy reloads certificate changes from the Secret without a restart.
+After renewing a certificate Secret, restart the proxy (`kubectl -n waf rollout restart deploy/waf-crowdsec-waf-proxy`) so it is certain to load it; automatic reload of mounted certificates has not been verified.
 
 ## 4. Configure
 
@@ -82,6 +83,77 @@ Minimum required: `tls.secretName` and `upstream.host`. Important settings:
 | `crowdsec.appsec.replicas` | AppSec scaling |
 | `crowdsec.appsec.rules` | Custom rules (rule `name` must start with `custom/`) |
 | `crs.*` | CRS paranoia level, anomaly threshold, disabled rule IDs, extra SecLang |
+
+### Configuring the upstream
+
+The chart protects **one upstream** (a single backend address). Every request that matches `route.rule` and passes the WAF
+is forwarded there; the connection from the proxy to the upstream is a separate hop from the client connection.
+
+| Value | Default | Meaning |
+|---|---|---|
+| `upstream.host` | required | DNS name of the backend. For a Kubernetes Service use `<service>.<namespace>.svc.cluster.local` |
+| `upstream.port` | `443` | Port of the Service (not the pod's target port) |
+| `upstream.scheme` | `https` | `https` re-encrypts to the backend, `http` sends plain text |
+| `upstream.serverName` | `upstream.host` | Name used for SNI and certificate verification. Set it when the certificate name differs from `host` |
+| `upstream.caSecret.name` / `.key` | empty / `ca.crt` | Secret holding the CA that signed the backend certificate. Empty means the system trust store is used |
+| `upstream.clientCertSecret` | empty | `kubernetes.io/tls` Secret with a client certificate, for backends that require mTLS |
+| `upstream.insecureSkipVerify` | `false` | Skip certificate verification. For testing only |
+| `route.rule` | ``PathPrefix(`/`)`` | Which requests are routed to the upstream, e.g. ``Host(`api.example.com`)`` |
+
+**Backend in the same cluster, HTTPS with a private CA** (the usual case):
+
+```sh
+kubectl -n waf create secret generic upstream-ca --from-file=ca.crt=upstream-ca.pem
+```
+
+```yaml
+upstream:
+  host: my-api.my-namespace.svc.cluster.local
+  port: 8443
+  scheme: https
+  caSecret: {name: upstream-ca, key: ca.crt}
+```
+
+The backend certificate must contain `host` (or `serverName`) as a DNS SAN. If it only has a name such as `my-api.internal`,
+keep `host` as the Service name and set `serverName: my-api.internal`.
+
+**Backend with a publicly trusted certificate** (for example an external API): omit `caSecret`, and set `host` to its public name.
+The cluster must be able to resolve it and reach it.
+
+**Backend that requires mTLS:**
+
+```sh
+kubectl -n waf create secret tls upstream-client --cert=client.crt --key=client.key
+```
+
+```yaml
+upstream:
+  clientCertSecret: upstream-client
+```
+
+**Plain HTTP backend** (for example inside a mesh that already encrypts traffic): `scheme: http` and the Service port, e.g. `port: 8080`.
+`caSecret`, `serverName` and `clientCertSecret` are ignored.
+
+**Notes**
+
+- The `Host` header of the client request is passed to the backend unchanged. If the backend expects a different host name,
+  that needs a header rewrite, which the chart doesn't provide yet.
+- Backends in other namespaces work with the full Service name. Secrets (`upstream-ca`, `upstream-client`) must be in the
+  release namespace.
+- The WAF does not load-balance across different backends. To protect several services, install one release per namespace,
+  or put them behind one Service. Traffic to a multi-replica Service is balanced by Kubernetes, not Traefik.
+- After changing certificate Secrets (including the upstream CA or client certificate), restart the proxy. After changing `upstream.*` values,
+  run `helm upgrade`; the proxy pods restart on their own.
+
+**Check the connection** from inside the cluster, before debugging the WAF:
+
+```sh
+kubectl -n waf run curl --rm -it --image=curlimages/curl --restart=Never -- \
+  curl -v --cacert /dev/null -k https://my-api.my-namespace.svc.cluster.local:8443/
+```
+
+If this works but requests through the proxy return `502` or `503`, check `kubectl -n waf logs deploy/waf-crowdsec-waf-proxy`
+for the TLS error, most often `x509: certificate is valid for ...` (wrong `serverName`) or `unknown authority` (missing or wrong CA).
 
 ## 5. Install
 
