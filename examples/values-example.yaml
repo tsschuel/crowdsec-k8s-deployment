@@ -1,35 +1,75 @@
-# Example values for a REST API behind the WAF. Copy, adjust, and pass with: helm install -f my-values.yaml
-waf:
-  mode: detect            # switch to "block" after reviewing alerts
-  failOpen: false
+# Example values for a REST/WebSocket API behind the WAF.
+# Copy, adjust, and pass with: helm install waf <chart> -n waf -f my-values.yaml
 
+# --- WAF behaviour -----------------------------------------------------------
+waf:
+  mode: detect            # detect = log and alert only; switch to "block" after reviewing alerts
+  failOpen: false         # block mode: reject requests when AppSec is unreachable
+
+# OWASP CRS tuning (restart the AppSec pods after changing)
+crs:
+  paranoiaLevel: 1        # 1-4, higher = more rules and more false positives
+  anomalyScoreThreshold: 5
+  disabledRuleIds: []     # e.g. [942100] to disable a rule that causes false positives
+
+# --- Incoming TLS and routing ------------------------------------------------
 tls:
   secretName: waf-frontend-tls       # kubernetes.io/tls Secret in the release namespace
 
 route:
   rule: "Host(`api.example.com`)"
 
+# --- Upstream (single backend, re-encrypted) ---------------------------------
 upstream:
   host: my-api.my-namespace.svc.cluster.local
   port: 8443
   scheme: https
   caSecret:
     name: upstream-ca                # Secret with key ca.crt
+    key: ca.crt
+  # serverName: my-api.internal       # if the certificate name differs from host
+  # clientCertSecret: upstream-client # kubernetes.io/tls Secret, for mTLS to the backend
 
+# --- Proxy -------------------------------------------------------------------
 proxy:
   replicas: 2
-  trustedIPs: ["10.0.0.0/8"]         # your load balancer / ingress source ranges
+  trustedIPs: ["10.0.0.0/8"]         # source ranges of your load balancer / ingress
   service:
     type: LoadBalancer
   autoscaling:
     enabled: false
+    minReplicas: 2
+    maxReplicas: 10
   timeouts:
     shutdownGrace: 120s              # time WebSocket connections get to finish on rollout
 
+# Prometheus Operator (leave off if Alloy scrapes pods directly, see docs/alloy.md)
+metrics:
+  podMonitor:
+    enabled: false
+
+# --- Registry pull secrets (Harbor) ------------------------------------------
 imagePullSecrets: [{name: harbor-pull}]
 
+# --- CrowdSec subchart (LAPI + AppSec) ---------------------------------------
 crowdsec:
   image:
     pullSecrets: [{name: harbor-pull}]
   appsec:
     replicas: 2
+    # Custom AppSec rules. The rule name must start with "custom/".
+    rules:
+      block-debug.yaml: |
+        name: custom/block-debug
+        description: "Block access to /debug"
+        rules:
+          - zones: [URI]
+            transform: [lowercase]
+            match: {type: startsWith, value: /debug}
+        labels:
+          type: exploit
+          service: http
+          behavior: "http:exploit"
+          confidence: 3
+          spoofable: 0
+          label: "Debug endpoint access"
