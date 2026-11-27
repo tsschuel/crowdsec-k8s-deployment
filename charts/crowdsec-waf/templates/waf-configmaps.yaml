@@ -1,0 +1,42 @@
+{{- /* Names are fixed: the official crowdsec subchart mounts them by name (see values.yaml). */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crowdsec-waf-mode
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+data:
+  waf-mode.yaml: |
+    # Rendered from waf.mode={{ .Values.waf.mode }}
+    name: custom/waf-mode
+    {{- if include "crowdsec-waf.isBlock" . }}
+    default_remediation: ban
+    {{- else }}
+    # allow = never block; matches are still logged and raised as alerts.
+    default_remediation: allow
+    {{- end }}
+    log_level: {{ lower .Values.waf.logLevel }}
+    inband_rules:
+      - custom/*
+    {{- if not (include "crowdsec-waf.isBlock" .) }}
+    inband:
+      on_match:
+        - apply:
+            - SendAlert()
+    {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crowdsec-waf-crs-plugin
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+data:
+  waf-tuning-before.conf: |
+    SecAction "id:9900100,phase:1,nolog,pass,t:none,setvar:'tx.blocking_paranoia_level={{ .Values.crs.paranoiaLevel }}',setvar:'tx.detection_paranoia_level={{ .Values.crs.paranoiaLevel }}',setvar:'tx.inbound_anomaly_score_threshold={{ .Values.crs.anomalyScoreThreshold }}'"
+    {{- range .Values.crs.disabledRuleIds }}
+    SecRuleRemoveById {{ . }}
+    {{- end }}
+    {{- with .Values.crs.extraSecLang }}
+    {{ . | nindent 4 | trim }}
+    {{- end }}

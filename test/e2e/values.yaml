@@ -1,0 +1,34 @@
+# Values for the kind end-to-end test. Image repositories/tags are set by scripts/e2e.sh.
+tls:
+  secretName: waf-frontend-tls
+upstream:
+  host: echo.waf-e2e.svc.cluster.local
+  port: 8080
+  scheme: http
+proxy:
+  replicas: 1
+  podDisruptionBudget:
+    enabled: false
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+crowdsec:
+  appsec:
+    replicas: 1
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 768Mi}
+    rules:
+      block-debug.yaml: |
+        name: custom/block-debug
+        description: "e2e: block /debug"
+        rules:
+          - zones: [URI]
+            transform: [lowercase]
+            match: {type: startsWith, value: /debug}
+        labels:
+          type: exploit
+          service: http
+          behavior: "http:exploit"
+          confidence: 3
+          spoofable: 0
+          label: "e2e debug endpoint"

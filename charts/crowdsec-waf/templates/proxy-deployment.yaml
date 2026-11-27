@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "crowdsec-waf.proxyName" . }}
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-proxy
+spec:
+  {{- if not .Values.proxy.autoscaling.enabled }}
+  replicas: {{ .Values.proxy.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/proxy-configmap.yaml") . | sha256sum }}
+        {{- with .Values.proxy.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "crowdsec-waf.labels" . | nindent 8 }}
+        {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 8 }}
+    spec:
+      # Long-lived WebSocket connections are drained on shutdown for up to timeouts.shutdownGrace.
+      terminationGracePeriodSeconds: {{ add (include "crowdsec-waf.shutdownGraceSeconds" . | int) 15 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: traefik
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --configFile=/etc/traefik/static/traefik.yml
+          ports:
+            - {name: websecure, containerPort: 8443}
+            - {name: metrics, containerPort: 9100}
+            - {name: ping, containerPort: 8082}
+          readinessProbe:
+            httpGet: {path: /ping, port: ping}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /ping, port: ping}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          startupProbe:
+            httpGet: {path: /ping, port: ping}
+            periodSeconds: 5
+            failureThreshold: 30
+          {{- with .Values.proxy.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - {name: static, mountPath: /etc/traefik/static, readOnly: true}
+            - {name: dynamic, mountPath: /etc/traefik/dynamic, readOnly: true}
+            - {name: frontend-tls, mountPath: /certs/frontend, readOnly: true}
+            - {name: bouncer-key, mountPath: /secrets/bouncer, readOnly: true}
+            {{- if .Values.upstream.caSecret.name }}
+            - {name: upstream-ca, mountPath: /certs/upstream-ca, readOnly: true}
+            {{- end }}
+            {{- if .Values.upstream.clientCertSecret }}
+            - {name: upstream-client, mountPath: /certs/upstream-client, readOnly: true}
+            {{- end }}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: static
+          configMap:
+            name: {{ include "crowdsec-waf.proxyName" . }}
+            items: [{key: traefik.yml, path: traefik.yml}]
+        - name: dynamic
+          configMap:
+            name: {{ include "crowdsec-waf.proxyName" . }}
+            items: [{key: dynamic.yml, path: dynamic.yml}]
+        - name: frontend-tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        - name: bouncer-key
+          secret:
+            secretName: {{ .Values.secrets.name }}
+            items: [{key: {{ .Values.secrets.bouncerKeyKey }}, path: {{ .Values.secrets.bouncerKeyKey }}}]
+        {{- if .Values.upstream.caSecret.name }}
+        - name: upstream-ca
+          secret:
+            secretName: {{ .Values.upstream.caSecret.name }}
+        {{- end }}
+        {{- if .Values.upstream.clientCertSecret }}
+        - name: upstream-client
+          secret:
+            secretName: {{ .Values.upstream.clientCertSecret }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.proxy.affinity }}
+      affinity:
+        {{- toYaml .Values.proxy.affinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.proxy.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

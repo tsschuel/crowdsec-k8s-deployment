@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "crowdsec-waf.proxyName" . }}
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-proxy
+  {{- with .Values.proxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  {{- if eq .Values.proxy.service.type "LoadBalancer" }}
+  # Local keeps the real client IP when no L7/proxy-protocol load balancer sits in front.
+  externalTrafficPolicy: Local
+  {{- end }}
+  selector:
+    {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ .Values.proxy.service.port }}
+      targetPort: websecure
+---
+{{- if .Values.metrics.serviceMonitor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "crowdsec-waf.proxyName" . }}-metrics
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-proxy-metrics
+spec:
+  clusterIP: None
+  selector:
+    {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+{{- end }}

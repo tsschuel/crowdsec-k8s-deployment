@@ -1,0 +1,35 @@
+# Example values for a REST API behind the WAF. Copy, adjust, and pass with: helm install -f my-values.yaml
+waf:
+  mode: detect            # switch to "block" after reviewing alerts
+  failOpen: false
+
+tls:
+  secretName: waf-frontend-tls       # kubernetes.io/tls Secret in the release namespace
+
+route:
+  rule: "Host(`api.example.com`)"
+
+upstream:
+  host: my-api.my-namespace.svc.cluster.local
+  port: 8443
+  scheme: https
+  caSecret:
+    name: upstream-ca                # Secret with key ca.crt
+
+proxy:
+  replicas: 2
+  trustedIPs: ["10.0.0.0/8"]         # your load balancer / ingress source ranges
+  service:
+    type: LoadBalancer
+  autoscaling:
+    enabled: false
+  timeouts:
+    shutdownGrace: 120s              # time WebSocket connections get to finish on rollout
+
+imagePullSecrets: [{name: harbor-pull}]
+
+crowdsec:
+  image:
+    pullSecrets: [{name: harbor-pull}]
+  appsec:
+    replicas: 2

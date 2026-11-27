@@ -1,0 +1,120 @@
+{{- $block := include "crowdsec-waf.isBlock" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "crowdsec-waf.proxyName" . }}
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+data:
+  traefik.yml: |
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+    log:
+      level: {{ .Values.proxy.logLevel }}
+      format: json
+    accessLog:
+      format: {{ include "crowdsec-waf.accessLogFormat" . }}
+      fields:
+        defaultMode: keep
+        headers:
+          defaultMode: drop
+          names:
+            User-Agent: keep
+            Referer: keep
+            X-Forwarded-For: keep
+            X-Request-Id: keep
+    ping:
+      entryPoint: ping
+    metrics:
+      prometheus:
+        entryPoint: metrics
+        addEntryPointsLabels: true
+        addRoutersLabels: true
+        addServicesLabels: true
+    entryPoints:
+      websecure:
+        address: ":8443"
+        transport:
+          respondingTimeouts:
+            readTimeout: {{ .Values.proxy.timeouts.read | quote }}
+            writeTimeout: {{ .Values.proxy.timeouts.write | quote }}
+            idleTimeout: {{ .Values.proxy.timeouts.idle | quote }}
+          lifeCycle:
+            requestAcceptGraceTimeout: {{ .Values.proxy.timeouts.requestAcceptGrace | quote }}
+            graceTimeOut: {{ .Values.proxy.timeouts.shutdownGrace | quote }}
+        {{- with .Values.proxy.trustedIPs }}
+        forwardedHeaders:
+          trustedIPs: {{ toJson . }}
+        {{- end }}
+      metrics:
+        address: ":9100"
+      ping:
+        address: ":8082"
+    providers:
+      file:
+        filename: /etc/traefik/dynamic/dynamic.yml
+        watch: true
+    experimental:
+      localPlugins:
+        crowdsec-bouncer:
+          moduleName: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+  dynamic.yml: |
+    http:
+      routers:
+        api:
+          entryPoints: [websecure]
+          rule: {{ .Values.route.rule | quote }}
+          service: upstream
+          middlewares: [crowdsec]
+          tls: {}
+      middlewares:
+        crowdsec:
+          plugin:
+            crowdsec-bouncer:
+              enabled: true
+              logLevel: {{ .Values.waf.logLevel }}
+              {{- if $block }}
+              crowdsecMode: stream
+              {{- else }}
+              # detect: no IP blocking, AppSec only (and AppSec never blocks in detect mode)
+              crowdsecMode: appsec
+              {{- end }}
+              crowdsecLapiScheme: http
+              crowdsecLapiHost: {{ include "crowdsec-waf.lapiHost" . | quote }}
+              crowdsecLapiKey: /secrets/bouncer/{{ .Values.secrets.bouncerKeyKey }}
+              crowdsecAppsecEnabled: true
+              crowdsecAppsecScheme: http
+              crowdsecAppsecHost: {{ include "crowdsec-waf.appsecHost" . | quote }}
+              crowdsecAppsecBodyLimit: {{ .Values.waf.bodyLimit | int64 }}
+              crowdsecAppsecFailureBlock: {{ if $block }}true{{ else }}false{{ end }}
+              crowdsecAppsecUnreachableBlock: {{ if and $block (not .Values.waf.failOpen) }}true{{ else }}false{{ end }}
+              updateIntervalSeconds: {{ .Values.waf.updateIntervalSeconds | int64 }}
+              forwardedHeadersTrustedIPs: {{ toJson (default (list) .Values.proxy.trustedIPs) }}
+      services:
+        upstream:
+          loadBalancer:
+            passHostHeader: true
+            serversTransport: upstream
+            servers:
+              - url: "{{ .Values.upstream.scheme }}://{{ .Values.upstream.host }}:{{ .Values.upstream.port }}"
+      serversTransports:
+        upstream:
+          serverName: {{ default .Values.upstream.host .Values.upstream.serverName | quote }}
+          insecureSkipVerify: {{ .Values.upstream.insecureSkipVerify }}
+          {{- if .Values.upstream.caSecret.name }}
+          rootCAs:
+            - /certs/upstream-ca/{{ .Values.upstream.caSecret.key }}
+          {{- end }}
+          {{- if .Values.upstream.clientCertSecret }}
+          certificates:
+            - certFile: /certs/upstream-client/tls.crt
+              keyFile: /certs/upstream-client/tls.key
+          {{- end }}
+    tls:
+      certificates:
+        - certFile: /certs/frontend/tls.crt
+          keyFile: /certs/frontend/tls.key
+      options:
+        default:
+          minVersion: {{ .Values.tls.minVersion }}

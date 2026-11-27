@@ -1,0 +1,12 @@
+apiVersion: v2
+name: crowdsec-waf
+description: Traefik reverse proxy with CrowdSec AppSec (OWASP CRS) acting as a WAF in front of a REST service
+type: application
+# Overwritten by `make helm-package` (--version / --app-version).
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  - name: crowdsec
+    version: 0.24.3
+    repository: https://crowdsecurity.github.io/helm-charts
+    condition: crowdsec.enabled

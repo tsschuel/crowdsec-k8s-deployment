@@ -1,0 +1,13 @@
+{{- if .Values.proxy.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "crowdsec-waf.proxyName" . }}
+  labels:
+    {{- include "crowdsec-waf.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.proxy.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "crowdsec-waf.proxySelectorLabels" . | nindent 6 }}
+{{- end }}

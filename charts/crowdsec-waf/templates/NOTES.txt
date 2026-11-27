@@ -1,0 +1,11 @@
+CrowdSec WAF deployed in "{{ .Values.waf.mode }}" mode.
+
+{{- if not (include "crowdsec-waf.isBlock" .) }}
+
+Detect-only: requests are inspected and matches are logged / raised as CrowdSec alerts, nothing is blocked.
+Review alerts:   kubectl -n {{ .Release.Namespace }} exec deploy/{{ .Release.Name }}-lapi -- cscli alerts list
+Switch to block: helm upgrade {{ .Release.Name }} <chart> --reuse-values --set waf.mode=block
+{{- end }}
+
+Proxy service:  {{ include "crowdsec-waf.proxyName" . }}:{{ .Values.proxy.service.port }}
+AppSec/CRS tuning or custom rule changes need: kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ .Release.Name }}-appsec

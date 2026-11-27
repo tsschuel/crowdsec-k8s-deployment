@@ -1,0 +1,5 @@
+# Minimal values used by `make helm-lint` / `make helm-template`.
+tls:
+  secretName: waf-frontend-tls
+upstream:
+  host: my-api.default.svc.cluster.local

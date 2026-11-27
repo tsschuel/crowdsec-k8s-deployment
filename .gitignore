@@ -1,0 +1,5 @@
+dist/
+charts/*/charts/
+charts/*/Chart.lock
+.idea/
+.DS_Store

@@ -1,0 +1,210 @@
+# -- Name overrides
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# WAF behaviour
+# ---------------------------------------------------------------------------
+waf:
+  # -- detect: inspect and log/alert only, never block (default while rolling out).
+  #    block:  block requests that match the OWASP CRS / virtual patching / custom rules and
+  #            enforce IP bans from CrowdSec decisions.
+  mode: detect
+  # -- Block mode only: let requests through when AppSec is unreachable (true) or reject them (false).
+  failOpen: false
+  # -- Max request body size (bytes) forwarded to AppSec for inspection.
+  bodyLimit: 10485760
+  # -- Log level of the bouncer plugin and the WAF config (DEBUG, INFO, WARNING, ERROR).
+  logLevel: INFO
+  # -- Seconds the bouncer caches IP decisions from the CrowdSec LAPI (block mode).
+  updateIntervalSeconds: 60
+
+# OWASP CRS tuning, rendered as a CRS plugin (see CrowdSec docs: appsec/crs/customization).
+# Changes require a restart of the AppSec pods: kubectl rollout restart deploy/<release>-appsec
+crs:
+  # -- CRS paranoia level 1-4. Higher = more rules, more false positives.
+  paranoiaLevel: 1
+  # -- CRS inbound anomaly score threshold at which a request is considered malicious.
+  anomalyScoreThreshold: 5
+  # -- CRS rule IDs to disable globally (prefer targeted exclusions in extraSecLang).
+  disabledRuleIds: []
+  # -- Free-form SecLang appended to the CRS "before" plugin file (rule exclusions, ctl actions, ...).
+  extraSecLang: ""
+
+# ---------------------------------------------------------------------------
+# Proxy (Traefik + CrowdSec bouncer plugin)
+# ---------------------------------------------------------------------------
+image:
+  repository: harbor.monitor.c8y.io/test1/crowdsec-waf-traefik
+  # -- Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+# -- Pull secrets for the proxy image, e.g. [{name: harbor-pull}]. The same must be set for
+#    crowdsec.image.pullSecrets below.
+imagePullSecrets: []
+
+proxy:
+  replicas: 2
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+  # -- Source ranges (CIDR) whose X-Forwarded-For is trusted. Set this to your load balancer /
+  #    ingress ranges, otherwise the bouncer sees the load balancer as the client IP.
+  trustedIPs: []
+  # -- Access log format. json is best for Loki; "common" is required if you enable the CrowdSec
+  #    agent to parse access logs (crowdsec.agent.enabled=true), where it is forced automatically.
+  accessLog:
+    format: json
+  logLevel: INFO
+  # -- Timeouts on the public entry point. WebSocket (Upgrade) requests work out of the box; the
+  #    defaults below keep long-lived connections open. Only the HTTP handshake is inspected by the
+  #    WAF, frames are not. Go duration strings ("0s" = no timeout).
+  timeouts:
+    read: 60s          # time to read the full request (handshake), not the connection lifetime
+    write: 0s          # 0s = unlimited, required for long-lived streaming/WebSocket responses
+    idle: 180s         # idle keep-alive HTTP connections (hijacked WebSocket connections are not affected)
+    requestAcceptGrace: 5s
+    # -- On shutdown, how long open connections (WebSockets) may finish before being closed.
+    shutdownGrace: 60s
+  service:
+    type: ClusterIP
+    port: 443
+    annotations: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  extraEnv: []
+
+# Public route to the single upstream service.
+route:
+  # -- Traefik router rule. Default: everything. Example: Host(`api.example.com`)
+  rule: "PathPrefix(`/`)"
+
+# Incoming TLS (terminated at the proxy).
+tls:
+  # -- Secret of type kubernetes.io/tls (tls.crt, tls.key). Required.
+  secretName: ""
+  minVersion: VersionTLS12
+
+# Upstream REST service (re-encrypted).
+upstream:
+  host: ""            # required, e.g. my-api.my-namespace.svc.cluster.local
+  port: 443
+  scheme: https       # https | http
+  # -- TLS server name (SNI/verification). Defaults to host.
+  serverName: ""
+  insecureSkipVerify: false
+  # -- Secret holding the CA that signed the upstream certificate. Empty = system trust store.
+  caSecret:
+    name: ""
+    key: ca.crt
+  # -- Secret (kubernetes.io/tls) with a client certificate for mTLS to the upstream. Optional.
+  clientCertSecret: ""
+
+# Generated bouncer API key shared by the proxy and CrowdSec LAPI.
+# The name must match crowdsec.lapi.env[BOUNCER_KEY_traefik] below (subchart values cannot be templated).
+secrets:
+  # -- Create the Secret (random key, preserved on upgrades). Set false to supply it yourself,
+  #    e.g. with External Secrets, under the same name and key.
+  create: true
+  name: crowdsec-waf-secrets
+  bouncerKeyKey: bouncer-api-key
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    additionalLabels: {}
+  podMonitor:
+    enabled: false
+    interval: 30s
+    additionalLabels: {}
+
+# ---------------------------------------------------------------------------
+# Official CrowdSec chart (LAPI + AppSec). Values below are passed through to it.
+# ---------------------------------------------------------------------------
+crowdsec:
+  enabled: true
+  image:
+    repository: harbor.monitor.c8y.io/test1/crowdsec-waf-crowdsec
+    # -- Empty = subchart appVersion (same as CROWDSEC_VERSION in versions.env).
+    tag: ""
+    pullSecrets: []
+  lapi:
+    enabled: true
+    replicas: 1
+    env:
+      - name: DISABLE_AGENT
+        value: "true"
+      - name: BOUNCER_KEY_traefik
+        valueFrom:
+          secretKeyRef:
+            name: crowdsec-waf-secrets
+            key: bouncer-api-key
+  agent:
+    # -- Behavioural detection from proxy access logs (brute force, probing, ...).
+    #    Needs an acquisition for the proxy pods and accessLog.format "common".
+    enabled: false
+  appsec:
+    enabled: true
+    replicas: 2
+    strategy:
+      type: RollingUpdate
+    acquisitions:
+      - source: appsec
+        listen_addr: 0.0.0.0:7422
+        path: /
+        appsec_configs:
+          - crowdsecurity/virtual-patching
+          - crowdsecurity/crs-inband
+          # Rendered by this chart from waf.mode; declared last so its default_remediation wins.
+          - custom/waf-mode
+        labels:
+          type: appsec
+    # Custom rules: add CrowdSec AppSec rules here. Rule names MUST start with "custom/" to be loaded
+    # (waf-mode loads custom/*).
+    rules: {}
+      # my-rule.yaml: |
+      #   name: custom/block-debug-endpoint
+      #   description: "Block access to /debug"
+      #   rules:
+      #     - zones: [URI]
+      #       transform: [lowercase]
+      #       match: {type: startsWith, value: /debug}
+      #   labels:
+      #     type: exploit
+      #     service: http
+      #     behavior: "http:exploit"
+      #     confidence: 3
+      #     spoofable: 0
+      #     label: "Debug endpoint access"
+    # ConfigMaps rendered by this chart. Names are fixed because subchart values cannot be templated;
+    # deploy one release per namespace.
+    extraVolumes:
+      - name: waf-mode
+        configMap:
+          name: crowdsec-waf-mode
+      - name: crs-plugin
+        configMap:
+          name: crowdsec-waf-crs-plugin
+    extraVolumeMounts:
+      - name: waf-mode
+        mountPath: /etc/crowdsec/appsec-configs/waf-mode.yaml
+        subPath: waf-mode.yaml
+      - name: crs-plugin
+        mountPath: /var/lib/crowdsec/data/crs-plugins/waf-tuning
+    resources:
+      requests: {cpu: 500m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    metrics:
+      enabled: true
